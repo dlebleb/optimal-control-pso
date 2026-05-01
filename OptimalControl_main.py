@@ -523,7 +523,7 @@ if __name__ == "__main__":
 
     best_cost, best_z = optimizer.optimize(
         pso_objective,
-        iters=200,
+        iters=2000,
         params=params
     )
 
