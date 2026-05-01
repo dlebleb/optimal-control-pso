@@ -1,4 +1,6 @@
 import numpy as np
+import pyswarms as ps
+import matplotlib.pyplot as plt
 
 #Toplam state vektoru 8-boyutlu.
 #Toplam control vektoru 4-boyutlu.
@@ -123,7 +125,9 @@ def unpack_z(z, params):
 
     return X_dec, U
 
-def build_X_full(X_dec, x0):
+def build_X_full(X_dec, params):
+    x0 = params["x0"]
+
     N = X_dec.shape[0]
     nx = X_dec.shape[1]
 
@@ -241,7 +245,7 @@ def reduce_speed_to_obstacle(x):
 
     return (v_obs_speed / v_w_speed) * v_w_vec #yön aynı kalır, sadece magnitude obstacle speed’e iner.
 
-def should_run_oc(x, tol=1e-6):
+def should_run_oc(x, params, tol=1e-6):
     r = compute_r(x)
     f_val = f_of_r(r, params)
 
@@ -271,11 +275,6 @@ def should_run_oc(x, tol=1e-6):
         return False, "safe", None
     
 def collision_potential(x, params):
-    d_encounter = params["d_encounter"]
-    c1 = params["c1"]
-    c2 = params["c2"]
-    sigma_deg = params["sigma_deg"]
-
     r = compute_r(x)
     theta_rad = compute_theta(x)
     v_w, v_obs = compute_speeds(x)
@@ -383,7 +382,7 @@ def compute_Jpen(X_full, U, params):
 
 def objective(z, params):
     X_dec, U = unpack_z(z, params)
-    X_full = build_X_full(X_dec, params["x0"])
+    X_full = build_X_full(X_dec, params)
 
     Jd = compute_Jd(X_full, U, params)
     Jterm = compute_Jterm(X_full, params)
@@ -422,8 +421,13 @@ def compute_tf(x, params):
 
     return tf
 
-z = np.random.randn(n_dec)
-print(objective(z, params))
+def pso_objective(Z, params):
+    n_particles = Z.shape[0]
+    costs = np.zeros(n_particles)
+    for i in range(n_particles):
+        costs[i] = objective(Z[i], params)
+    return costs
+
 
 #control vektoru cok buyuk olamaz, sinirlidir. Velocity'e sinir koy, unbounded/infinite acceleration olamaz, sonsuz gucle zink diye hizini degistiriyor demek, fiziksel sistemlerde moment of intertia var.
 #5 ise wheelchair icin, onun carpacagi insanlar icin 10 diyebilirsin. 
@@ -433,3 +437,147 @@ print(objective(z, params))
 #optimum state, state denklemlerden bulacaksin.
 #optimizasyon ne verdi? karsilastir ona gore penalty katsayisini tune et.
 #state aslinda dependent degisken optimizasyon basitlestirmek icin independent degisken gibi aldik onu da. 
+
+
+if __name__ == "__main__":
+
+    # -----------------------------
+    # 1) tf hesapla
+    # -----------------------------
+    tf = compute_tf(params["x0"], params)
+
+    params["tf"] = tf
+    params["dt"] = tf / params["N"]
+
+    print("tf =", tf)
+    print("dt =", params["dt"])
+
+    # -----------------------------
+    # 2) Bounds (direkt burada)
+    # -----------------------------
+
+    pos_bound  = 10.0   # pozisyon ±10 m
+    vel_bound  = 2.0    # hız ±2 m/s
+    ctrl_bound = 5.0    # kontrol (ivme) ±5 m/s²
+
+    x_min = np.array([
+        -pos_bound, -pos_bound,
+        -pos_bound, -pos_bound,
+        -vel_bound, -vel_bound,
+        -vel_bound, -vel_bound
+    ])
+
+    x_max = np.array([
+        pos_bound, pos_bound,
+        pos_bound, pos_bound,
+        vel_bound, vel_bound,
+        vel_bound, vel_bound
+    ])
+
+    u_min = np.array([
+        -ctrl_bound, -ctrl_bound,
+        -ctrl_bound, -ctrl_bound
+    ])
+
+    u_max = np.array([
+        ctrl_bound, ctrl_bound,
+        ctrl_bound, ctrl_bound
+    ])
+
+    lower_bounds = np.concatenate([
+        np.tile(x_min, N),
+        np.tile(u_min, N)
+    ])
+
+    upper_bounds = np.concatenate([
+        np.tile(x_max, N),
+        np.tile(u_max, N)
+    ])
+
+    bounds = (lower_bounds, upper_bounds)
+
+    # -----------------------------
+    # 3) PSO ayarları
+    # -----------------------------
+    options = {
+        "c1": 1.5,
+        "c2": 1.5,
+        "w": 0.7
+    }
+
+    optimizer = ps.single.GlobalBestPSO(
+        n_particles=50,
+        dimensions=n_dec,
+        options=options,
+        bounds=bounds
+    )
+
+    # -----------------------------
+    # 4) Run
+    # -----------------------------
+    
+    #Jd(running cost: carpisma riski + control effort)
+    #Jterm(baslangictan ne kadar saptin)
+    #Jpen(dynamics ne kadar ihlal edildi)
+
+
+    best_cost, best_z = optimizer.optimize(
+        pso_objective,
+        iters=200,
+        params=params
+    )
+
+    print("Best cost:", best_cost)
+
+    # -----------------------------
+    # 5) Aç
+    # -----------------------------
+    X_dec_best, U_best = unpack_z(best_z, params)
+    X_full_best = build_X_full(X_dec_best, params)
+
+
+    print("=" * 40)
+    print(f"En iyi maliyet : {best_cost:.4f}")
+    print(f"Jd   = {compute_Jd(X_full_best, U_best, params):.4f}")
+    print(f"Jterm= {compute_Jterm(X_full_best, params):.4f}")
+    print(f"Jpen = {compute_Jpen(X_full_best, U_best, params):.4f}")
+    print("=" * 40)
+    print(f"p1 başlangıç : {X_full_best[0, 0:2]}")
+    print(f"p1 bitiş     : {X_full_best[-1, 0:2]}")
+    print(f"p2 başlangıç : {X_full_best[0, 2:4]}")
+    print(f"p2 bitiş     : {X_full_best[-1, 2:4]}")
+    print(f"v1 başlangıç : {X_full_best[0, 4:6]}")
+    print(f"v1 bitiş     : {X_full_best[-1, 4:6]}")
+    print(f"v2 başlangıç : {X_full_best[0, 6:8]}")
+    print(f"v2 bitiş     : {X_full_best[-1, 6:8]}")
+
+    # ── Plot 1: Maliyet geçmişi ──────────────────────────────
+    plt.figure(figsize=(10, 4))
+    plt.plot(optimizer.cost_history)
+    plt.xlabel("İterasyon")
+    plt.ylabel("En iyi maliyet")
+    plt.title("PSO — Maliyet geçmişi")
+    plt.yscale("log")   # log scale: başta büyük, sonda küçük değerleri iyi gösterir
+    plt.grid(True)
+    plt.tight_layout()
+    plt.show()
+
+    # ── Plot 2: Trajektori (p1 ve p2 yolu) ───────────────────
+    p1_traj = X_full_best[:, 0:2]   # (11, 2)
+    p2_traj = X_full_best[:, 2:4]   # (11, 2)
+
+    plt.figure(figsize=(7, 7))
+    plt.plot(p1_traj[:, 0], p1_traj[:, 1], 'b-o', label='p1 (wheelchair)')
+    plt.plot(p2_traj[:, 0], p2_traj[:, 1], 'r-o', label='p2 (obstacle)')
+    plt.plot(p1_traj[0, 0],  p1_traj[0, 1],  'bs', markersize=10, label='p1 start')
+    plt.plot(p2_traj[0, 0],  p2_traj[0, 1],  'rs', markersize=10, label='p2 start')
+    plt.plot(p1_traj[-1, 0], p1_traj[-1, 1], 'b*', markersize=14, label='p1 end')
+    plt.plot(p2_traj[-1, 0], p2_traj[-1, 1], 'r*', markersize=14, label='p2 end')
+    plt.xlabel("x (m)")
+    plt.ylabel("y (m)")
+    plt.title("Trajektori — p1 ve p2")
+    plt.legend()
+    plt.axis("equal")
+    plt.grid(True)
+    plt.tight_layout()
+    plt.show()
